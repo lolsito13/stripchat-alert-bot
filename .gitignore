@@ -9,3 +9,7 @@ __pycache__/
 
 # archivos intermedios del armado del sticker
 sticker/temporal.mp4
+sticker/temporal_alpha.mkv
+sticker/frames/
+sticker/cut/
+sticker/analisis.png

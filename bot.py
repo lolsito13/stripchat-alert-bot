@@ -235,6 +235,20 @@ def telegram(session, token, method, payload=None, files=None):
     return data
 
 
+def send_text(session, cfg, text):
+    """Manda texto al grupo, sin la preview del link (la miniatura)."""
+    telegram(
+        session,
+        cfg["token"],
+        "sendMessage",
+        payload={
+            "chat_id": cfg["chat_id"],
+            "text": text,
+            "link_preview_options": '{"is_disabled":true}',
+        },
+    )
+
+
 def send_alert(session, cfg, text, model_id, is_online):
     """Manda el aviso: al conectarse, sticker si hay configurado, si no foto
     de la sala; al desconectarse, solo texto."""
@@ -248,7 +262,7 @@ def send_alert(session, cfg, text, model_id, is_online):
             )
         except RuntimeError as exc:
             log("Aviso: no se pudo mandar el sticker ({}); sigo con el texto.".format(exc))
-        telegram(session, cfg["token"], "sendMessage", payload={"chat_id": cfg["chat_id"], "text": text})
+        send_text(session, cfg, text)
         return
     if cfg["send_photo"] and model_id:
         photo, ctype = download_snapshot(session, model_id)
@@ -265,7 +279,7 @@ def send_alert(session, cfg, text, model_id, is_online):
                 return
             except RuntimeError as exc:
                 log("Aviso: no se pudo mandar la foto ({}); mando solo texto.".format(exc))
-    telegram(session, cfg["token"], "sendMessage", payload={"chat_id": cfg["chat_id"], "text": text})
+    send_text(session, cfg, text)
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +421,7 @@ def cmd_test_message(cfg):
             )
         except RuntimeError as exc:
             log("Aviso: no se pudo mandar el sticker ({}).".format(exc))
-    telegram(session, cfg["token"], "sendMessage", payload={"chat_id": cfg["chat_id"], "text": text})
+    send_text(session, cfg, text)
     print("Mensaje de prueba enviado. Fijate en el grupo.")
     return 0
 
