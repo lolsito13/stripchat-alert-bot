@@ -1,0 +1,59 @@
+# Chequea cada 5 minutos si la modelo está en vivo y avisa al grupo de Telegram.
+# También se puede correr a mano: solapa "Actions" -> "Aviso de stream" -> "Run workflow".
+name: Aviso de stream
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # cada 5 minutos (se puede bajar a */10 o */15)
+  workflow_dispatch: {}
+
+# permiso para commitear el archivo de estado (state.json)
+permissions:
+  contents: write
+
+# evita que dos corridas se pisen
+concurrency:
+  group: aviso-stream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Chequear estado
+        env:
+          STRIPCHAT_MODEL: ${{ secrets.STRIPCHAT_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py check
+
+      - name: Guardar estado
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f state.json ]; then
+            git add state.json
+          fi
+          if git diff --cached --quiet; then
+            # no cambió nada: cada 7 días un commit "keepalive" para que
+            # GitHub no desactive el workflow por inactividad
+            LAST=$(git log -1 --format=%ct 2>/dev/null || echo 0)
+            NOW=$(date +%s)
+            if [ $((NOW - LAST)) -gt 604800 ]; then
+              git commit --allow-empty -m "keepalive"
+              git push
+            fi
+          else
+            git commit -m "actualizar estado"
+            git push
+          fi

@@ -1,0 +1,8 @@
+# nunca subir el archivo con el token del bot
+.env
+
+__pycache__/
+*.pyc
+
+# se commitea a propósito (lo usa GitHub Actions para recordar el estado):
+# state.json
