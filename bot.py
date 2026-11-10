@@ -86,7 +86,9 @@ def load_dotenv():
 
 
 def setting(name, default=""):
-    return os.environ.get(name, default).strip()
+    # "\n" escrito en el .env cuenta como salto de línea (para mensajes
+    # de varias líneas sin romper el formato clave=valor de una sola línea)
+    return os.environ.get(name, default).strip().replace("\\n", "\n")
 
 
 def require(*names):
@@ -127,6 +129,7 @@ def load_config():
         "chat_id": setting("TELEGRAM_CHAT_ID"),
         "model": setting("STRIPCHAT_MODEL"),
         "send_photo": setting("SEND_PHOTO", "1") not in ("0", "false", "no"),
+        "sticker_id": setting("STICKER_FILE_ID"),
         "notify_offline": setting("NOTIFY_OFFLINE", "0") in ("1", "true", "yes"),
         "message_online": setting("MESSAGE_ONLINE") or DEFAULT_ONLINE,
         "message_offline": setting("MESSAGE_OFFLINE") or DEFAULT_OFFLINE,
@@ -232,8 +235,21 @@ def telegram(session, token, method, payload=None, files=None):
     return data
 
 
-def send_alert(session, cfg, text, model_id):
-    """Manda el aviso: con foto si se pudo bajar, si no solo texto."""
+def send_alert(session, cfg, text, model_id, is_online):
+    """Manda el aviso: al conectarse, sticker si hay configurado, si no foto
+    de la sala; al desconectarse, solo texto."""
+    if is_online and cfg["sticker_id"]:
+        try:
+            telegram(
+                session,
+                cfg["token"],
+                "sendSticker",
+                payload={"chat_id": cfg["chat_id"], "sticker": cfg["sticker_id"]},
+            )
+        except RuntimeError as exc:
+            log("Aviso: no se pudo mandar el sticker ({}); sigo con el texto.".format(exc))
+        telegram(session, cfg["token"], "sendMessage", payload={"chat_id": cfg["chat_id"], "text": text})
+        return
     if cfg["send_photo"] and model_id:
         photo, ctype = download_snapshot(session, model_id)
         if photo:
@@ -318,14 +334,14 @@ def run_check(session, cfg):
     if online and not was_online:
         log("Se conectó -> mandando aviso al grupo...")
         text = build_message(cfg["message_online"], username, show)
-        send_alert(session, cfg, text, model_id)
+        send_alert(session, cfg, text, model_id, True)
         save_state(True)
         log("Aviso enviado.")
     elif not online and was_online:
         if cfg["notify_offline"]:
             log("Se desconectó -> mandando aviso al grupo...")
             text = build_message(cfg["message_offline"], username, show)
-            send_alert(session, cfg, text, None)
+            send_alert(session, cfg, text, None, False)
             save_state(False)
             log("Aviso enviado.")
         else:
@@ -376,7 +392,21 @@ def cmd_status(cfg):
 
 def cmd_test_message(cfg):
     session = make_session()
-    text = "✅ Bot de avisos de Stripchat funcionando. Si ves esto, la configuración está bien."
+    username = normalize_model(cfg["model"]) if cfg["model"] else "usuaria"
+    text = (
+        "🧪 Prueba: así va a llegar el aviso cuando se conecte:\n\n"
+        + build_message(cfg["message_online"], username, "public")
+    )
+    if cfg["sticker_id"]:
+        try:
+            telegram(
+                session,
+                cfg["token"],
+                "sendSticker",
+                payload={"chat_id": cfg["chat_id"], "sticker": cfg["sticker_id"]},
+            )
+        except RuntimeError as exc:
+            log("Aviso: no se pudo mandar el sticker ({}).".format(exc))
     telegram(session, cfg["token"], "sendMessage", payload={"chat_id": cfg["chat_id"], "text": text})
     print("Mensaje de prueba enviado. Fijate en el grupo.")
     return 0
@@ -413,6 +443,94 @@ def cmd_get_chat_id(cfg):
     return 0
 
 
+def cmd_get_sticker_id(cfg):
+    session = make_session()
+    data = telegram(session, cfg["token"], "getUpdates", payload={"limit": 100})
+    found = []
+    for upd in data.get("result", []):
+        for key in ("message", "edited_message", "channel_post"):
+            msg = upd.get(key)
+            if msg and isinstance(msg.get("sticker"), dict):
+                found.append(msg["sticker"])
+    if not found:
+        print("No vi ningún sticker todavía.")
+        print("Hacé esto y volvé a correr el comando:")
+        print("  1) Buscá al bot (ej: @panchiibot) en Telegram y abrí un chat privado.")
+        print("  2) Mandale ahí el sticker que querés usar (de cualquier pack).")
+        print("  3) Volvé a correr: python bot.py get-sticker-id")
+        return 1
+    print("Stickers que le mandaron al bot (el ÚLTIMO es el que se va a usar):")
+    for st in found:
+        emoji = st.get("emoji", "?")
+        sset = st.get("sticker_set_name") or "sticker suelto (sin pack)"
+        print('  emoji {}  pack: {}'.format(emoji, sset))
+        print('  file_id: {}'.format(st.get("file_id")))
+    print("\nEl file_id se configura en STICKER_FILE_ID (en el .env o el secret de GitHub).")
+    return 0
+
+
+def cmd_make_sticker_set(cfg, args):
+    """Crea un pack de stickers desde un .webm y muestra el file_id."""
+    session = make_session()
+    path = Path(args.file).expanduser()
+    if not path.is_file():
+        print("No encontré el archivo: {}".format(path))
+        return 1
+    if path.suffix.lower() != ".webm":
+        print("El archivo tiene que ser .webm (convertilo con ffmpeg primero).")
+        return 1
+    user_id = setting("TELEGRAM_USER_ID")
+    if not user_id or not user_id.isdigit():
+        print("Falta tu ID de usuario de Telegram (TELEGRAM_USER_ID en el .env).")
+        print("Se ve corriendo get-chat-id después de escribirle al bot por privado.")
+        return 1
+
+    # el nombre del pack tiene que terminar en _by_<username del bot>
+    me = telegram(session, cfg["token"], "getMe")["result"]
+    suffix = "_by_" + me["username"]
+    name = (args.name or setting("STICKER_SET_NAME") or "diosita").lower()
+    if not name.endswith(suffix):
+        name += suffix
+    if not re.match(r"^[a-z0-9_]+$", name):
+        print("El nombre del pack solo acepta letras, números y _ (sin espacios ni acentos).")
+        return 1
+    title = args.title or "Nuestra Diosa"
+
+    try:
+        with open(path, "rb") as f:
+            telegram(
+                session,
+                cfg["token"],
+                "createNewStickerSet",
+                payload={
+                    "user_id": user_id,
+                    "name": name,
+                    "title": title,
+                    "sticker_type": "regular",
+                    "stickers": json.dumps(
+                        [{"sticker": "attach://sticker", "emoji_list": [args.emoji]}]
+                    ),
+                },
+                files={"sticker": (path.name, f, "video/webm")},
+            )
+    except RuntimeError as exc:
+        print("No se pudo crear el pack: {}".format(exc))
+        msg = str(exc).lower()
+        if "already" in msg or "occupied" in msg:
+            print("Ese nombre de pack ya existe; probá con --name otro_nombre")
+        else:
+            print("¿Ya le mandaste un mensaje privado al bot? Es requisito para crear tu pack.")
+        return 1
+
+    data = telegram(session, cfg["token"], "getStickerSet", payload={"name": name})
+    print("¡Pack creado!")
+    print("Link para usarlo en tus chats: https://t.me/addstickers/{}".format(name))
+    print("Poné este valor en STICKER_FILE_ID (y en el secret de GitHub si usás Actions):")
+    for st in data["result"]["stickers"]:
+        print("  {}".format(st["file_id"]))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -432,19 +550,27 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Comandos útiles:\n"
-            "  get-chat-id   averigua el ID del grupo\n"
-            "  test-message  manda un mensaje de prueba al grupo\n"
-            "  status        muestra el estado actual de la modelo\n"
-            "  check         chequea una vez y avisa si se conectó\n"
-            "  loop          chequea para siempre (PC encendida)"
+            "  get-chat-id    averigua el ID del grupo\n"
+            "  get-sticker-id captura el sticker que le mandaste al bot por privado\n"
+            "  make-sticker-set crea tu pack de stickers desde un .webm\n"
+            "  test-message   manda un mensaje de prueba al grupo\n"
+            "  status         muestra el estado actual de la modelo\n"
+            "  check          chequea una vez y avisa si se conectó\n"
+            "  loop           chequea para siempre (PC encendida)"
         ),
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("check", help="chequea una vez y avisa si se conectó/desconectó (ideal para cron)")
     sub.add_parser("loop", help="chequea en forma continua, cada CHECK_INTERVAL segundos")
     sub.add_parser("status", help="muestra el estado actual, sin avisar nada")
-    sub.add_parser("test-message", help="manda un mensaje de prueba al grupo")
+    sub.add_parser("test-message", help="manda un mensaje de prueba al grupo (previsualiza sticker y texto)")
     sub.add_parser("get-chat-id", help="lista los chats que ve el bot (para averiguar el ID del grupo)")
+    sub.add_parser("get-sticker-id", help="lista los stickers que le mandaron al bot (para configurar el aviso)")
+    p = sub.add_parser("make-sticker-set", help="crea un pack de stickers desde un .webm y devuelve el file_id")
+    p.add_argument("file", help="archivo .webm (un lado de 512px, hasta 3s, VP9, sin audio)")
+    p.add_argument("--emoji", default="👑", help="emoji asociado al sticker (default: 👑)")
+    p.add_argument("--name", default=None, help="nombre del pack (default: diosita_by_<bot>)")
+    p.add_argument("--title", default=None, help="título visible del pack (default: Nuestra Diosa)")
     args = parser.parse_args()
 
     if not args.command:
@@ -461,6 +587,10 @@ def main():
         require("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
     elif args.command == "get-chat-id":
         require("TELEGRAM_BOT_TOKEN")
+    elif args.command == "get-sticker-id":
+        require("TELEGRAM_BOT_TOKEN")
+    elif args.command == "make-sticker-set":
+        require("TELEGRAM_BOT_TOKEN")
 
     commands = {
         "check": cmd_check,
@@ -468,6 +598,8 @@ def main():
         "status": cmd_status,
         "test-message": cmd_test_message,
         "get-chat-id": cmd_get_chat_id,
+        "get-sticker-id": cmd_get_sticker_id,
+        "make-sticker-set": cmd_make_sticker_set,
     }
     try:
         return commands[args.command](cfg)

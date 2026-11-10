@@ -6,3 +6,6 @@ __pycache__/
 
 # se commitea a propósito (lo usa GitHub Actions para recordar el estado):
 # state.json
+
+# archivos intermedios del armado del sticker
+sticker/temporal.mp4

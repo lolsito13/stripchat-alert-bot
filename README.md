@@ -168,7 +168,13 @@ sesión).
 ## Personalización (todo opcional, en el `.env`)
 
 ```
-# foto de la sala en el aviso (por defecto: sí)
+# sticker en vez de la foto de la sala (ver abajo cómo se consigue)
+STICKER_FILE_ID=...
+
+# mensaje de conexión: {model} {show} {url} (\n = salto de línea)
+MESSAGE_ONLINE=Prendio nuestra Diosa!! 👑👑👑\n👉 {url}
+
+# foto de la sala en el aviso (solo si no hay sticker; por defecto: sí)
 SEND_PHOTO=0
 
 # avisar también cuando se desconecta (por defecto: no)
@@ -177,10 +183,46 @@ NOTIFY_OFFLINE=1
 # cada cuántos segundos chequear en modo loop (por defecto: 60)
 CHECK_INTERVAL=30
 
-# mensajes personalizados: {model} {show} {url}
-MESSAGE_ONLINE=🔴 ¡{model} está EN VIVO! Show: {show} 👉 {url}
+# mensaje de desconexión
 MESSAGE_OFFLINE=⚫ {model} se desconectó
 ```
+
+### Sticker en vez de la foto
+
+1. Abrí un chat **privado** con el bot (ej: `@panchiibot`) y mandale el
+   sticker que quieras usar.
+2. Corré `python bot.py get-sticker-id` → te muestra el `file_id`.
+3. Ponelo en `STICKER_FILE_ID` (en el `.env` o como secret de GitHub
+   Actions). El aviso queda: sticker + mensaje de texto.
+
+Si en algún momento querés cambiar el sticker, mandale otro al bot por
+privado, volvé a correr `get-sticker-id` y actualizá el valor.
+
+### Crear tu propio sticker animado (de video)
+
+Telegram acepta stickers de video en `.webm` con codec VP9: un lado de
+exactamente 512px, hasta 3 segundos, hasta 30 fps, sin audio y menos de
+256 KB. El flujo completo:
+
+1. Hacé un video corto con lo que tengas (CapCut, Canva, un GIF, etc.).
+2. Convertilo al formato exacto con ffmpeg:
+
+   ```
+   ffmpeg -i entrada.mp4 -t 3 -vf "scale=512:512:force_original_aspect_ratio=increase,crop=512:512,fps=30" -c:v libvpx-vp9 -b:v 0 -crf 40 -an sticker.webm
+   ```
+
+   (si pesa más de 256 KB, subí el `-crf`: números más grandes = más chico)
+
+3. Mandale antes un mensaje privado al bot (requisito de Telegram para
+   crear packs) y creá el pack:
+
+   ```
+   python bot.py make-sticker-set sticker.webm
+   ```
+
+   → te devuelve el link del pack (`t.me/addstickers/...`, para usarlo en
+   todos tus chats) y el `file_id`.
+4. Cargá ese `file_id` en `STICKER_FILE_ID`.
 
 ## Problemas comunes
 
