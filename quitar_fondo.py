@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageFilter
 from rembg import new_session, remove
 
 FFMPEG = "C:/Users/Intel/AppData/Local/Microsoft/WinGet/Links/ffmpeg.exe"
@@ -36,6 +36,14 @@ def main():
 
     for i, f in enumerate(frames, 1):
         recortado = remove(Image.open(f), session=session)
+        # transparencia BINARIA: la IA deja zonas semitransparentes que en
+        # Telegram se ven como sombras negras que tapan la imagen. Con el
+        # umbral, la persona queda 100% opaca y el fondo 100% vacío.
+        a = recortado.getchannel("A")
+        a = a.point(lambda x: 255 if x >= 160 else 0)
+        # borde apenas suavizado (1px) para que no se vea recortado a lo tijera
+        a = a.filter(ImageFilter.GaussianBlur(1.0)).point(lambda x: 255 if x >= 128 else 0)
+        recortado.putalpha(a)
         recortado.save(CUT / f.name)
         print("frame {}/{}".format(i, len(frames)), flush=True)
 
