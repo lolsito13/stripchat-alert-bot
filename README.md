@@ -172,7 +172,7 @@ sesión).
 STICKER_FILE_ID=...
 
 # mensaje de conexión: {model} {show} {url} (\n = salto de línea)
-MESSAGE_ONLINE=Prendio nuestra Diosa!! 👑👑👑\n👉 {url}
+MESSAGE_ONLINE=Prendio directo la Queen 👑👑👑❤️❤️❤️\n👉 {url}
 
 # foto de la sala en el aviso (solo si no hay sticker; por defecto: sí)
 SEND_PHOTO=0
