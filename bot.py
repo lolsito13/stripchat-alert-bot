@@ -11,6 +11,7 @@ Comandos:
     python bot.py test-message  manda un mensaje de prueba al grupo
     python bot.py status        muestra el estado actual de la modelo
     python bot.py check         chequea una vez y avisa si se conectó
+    python bot.py top           muestra el top de donadores de la modelo
     python bot.py loop          chequea para siempre (para dejar la PC encendida)
 
 Configuración: variables de entorno o archivo .env junto a este script
@@ -23,6 +24,7 @@ import os
 import re
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
@@ -124,6 +126,10 @@ def load_config():
         interval = int(setting("CHECK_INTERVAL", "60") or 60)
     except ValueError:
         interval = 60
+    try:
+        top_limit = int(setting("TOP_LIMIT", "10") or 10)
+    except ValueError:
+        top_limit = 10
     return {
         "token": setting("TELEGRAM_BOT_TOKEN"),
         "chat_id": setting("TELEGRAM_CHAT_ID"),
@@ -131,6 +137,9 @@ def load_config():
         "send_photo": setting("SEND_PHOTO", "1") not in ("0", "false", "no"),
         "sticker_id": setting("STICKER_FILE_ID"),
         "notify_offline": setting("NOTIFY_OFFLINE", "0") in ("1", "true", "yes"),
+        "top_enabled": setting("TOP_ENABLED", "1") not in ("0", "false", "no"),
+        # la API de Stripchat devuelve como máximo 10 puestos
+        "top_limit": min(10, max(1, top_limit)),
         "message_online": setting("MESSAGE_ONLINE") or DEFAULT_ONLINE,
         "message_offline": setting("MESSAGE_OFFLINE") or DEFAULT_OFFLINE,
         "interval": max(15, interval),
@@ -213,6 +222,26 @@ def download_snapshot(session, model_id):
     return None, None
 
 
+def query_tippers(session, model_id, period="day"):
+    """Devuelve el top de donadores (lista de {tokens, user}).
+
+    period: "day" (hoy), "month" (mes en curso) o "last" (mes pasado).
+    """
+    if period == "month":
+        path = "/models/{}/tips-leaderboard/current-month".format(model_id)
+    elif period == "last":
+        last_month = date.today().replace(day=1) - timedelta(days=1)
+        path = "/models/{}/tips-leaderboard/monthly/{:02d}/{}".format(
+            model_id, last_month.month, last_month.year
+        )
+    else:
+        path = "/models/{}/tips-leaderboard".format(model_id)
+    resp = http(session, "GET", STRIPCHAT_API + path)
+    if resp.status_code != 200:
+        raise RuntimeError("HTTP {} al consultar el top".format(resp.status_code))
+    return resp.json().get("leaderboard") or []
+
+
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
@@ -283,20 +312,164 @@ def send_alert(session, cfg, text, model_id, is_online):
 
 
 # ---------------------------------------------------------------------------
+# Top de donadores (/top en el grupo)
+# ---------------------------------------------------------------------------
+
+TOP_PERIODS = {
+    "day": "hoy",
+    "month": "este mes",
+    "last": "el mes pasado",
+}
+
+TOP_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def parse_top_period(arg):
+    words = (arg or "").lower().split()
+    if any(w in ("pasado", "anterior", "last") for w in words):
+        return "last"
+    if any(w in ("mes", "month", "actual") for w in words):
+        return "month"
+    return "day"
+
+
+def format_tippers(username, tippers, period, limit):
+    lines = [
+        "🏆 Top donadores de {} ({})".format(
+            username, TOP_PERIODS.get(period, "hoy")
+        ),
+        "",
+    ]
+    if not tippers:
+        lines.append("Todavía no hay donadores en este período.")
+    for pos, entry in enumerate(tippers[:limit], 1):
+        user = entry.get("user") or {}
+        name = user.get("username") or user.get("login") or "anónimo"
+        tokens = int(entry.get("tokens") or 0)
+        tokens_txt = "{:,}".format(tokens).replace(",", ".")
+        prefix = TOP_MEDALS.get(pos, "{}.".format(pos))
+        lines.append("{} {} — {} tokens".format(prefix, name, tokens_txt))
+    lines += ["", "👉 https://stripchat.com/{}".format(username)]
+    return "\n".join(lines)
+
+
+def can_answer_chat(cfg, chat):
+    """Solo contestamos en el grupo configurado o por privado al dueño."""
+    if not chat:
+        return False
+    if cfg["chat_id"] and str(chat.get("id")) == str(cfg["chat_id"]):
+        return True
+    if chat.get("type") == "private":
+        owner = setting("TELEGRAM_USER_ID")
+        return not owner or str(owner) == str(chat.get("id"))
+    return False
+
+
+def answer_top(
+    session, cfg, model_id, username, chat_id, message_id, period, thread_id=None
+):
+    try:
+        tippers = query_tippers(session, model_id, period)
+        text = format_tippers(username, tippers, period, cfg["top_limit"])
+    except Exception as exc:
+        log("Aviso: no se pudo armar el /top ({}).".format(exc))
+        text = "No pude obtener el top de donadores ahora. Probá de nuevo en un rato."
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "link_preview_options": '{"is_disabled":true}',
+        "reply_to_message_id": message_id,
+        "allow_sending_without_reply": "true",
+    }
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    telegram(session, cfg["token"], "sendMessage", payload=payload)
+
+
+def handle_message(session, cfg, model_id, username, msg):
+    chat = msg.get("chat") or {}
+    if not can_answer_chat(cfg, chat):
+        return
+    text = (msg.get("text") or "").strip()
+    if not text.startswith("/"):
+        return
+    command, _, arg = text.partition(" ")
+    command = command.split("@", 1)[0].lower()
+    if command != "/top":
+        return
+    period = parse_top_period(arg)
+    log("Comando /top ({}) en el chat {}.".format(TOP_PERIODS[period], chat.get("id")))
+    answer_top(
+        session,
+        cfg,
+        model_id,
+        username,
+        chat.get("id"),
+        msg.get("message_id"),
+        period,
+        msg.get("message_thread_id"),
+    )
+
+
+def process_updates(session, cfg, model_id, username):
+    """Lee los mensajes nuevos del bot y contesta los /top.
+
+    Telegram guarda los mensajes 24 h; el "offset" se guarda en state.json
+    para no contestar dos veces el mismo comando.
+    """
+    if not cfg["top_enabled"]:
+        return
+    state = load_state() or {}
+    offset = state.get("update_offset")
+    payload = {
+        "timeout": 0,
+        "limit": 100,
+        "allowed_updates": '["message","channel_post"]',
+    }
+    if offset:
+        payload["offset"] = int(offset)
+    data = telegram(session, cfg["token"], "getUpdates", payload=payload)
+    updates = data.get("result") or []
+    if not updates:
+        return
+    last_id = max(int(upd.get("update_id", 0)) for upd in updates)
+    first_poll = not offset
+    now = time.time()
+    for upd in updates:
+        msg = upd.get("message") or upd.get("channel_post")
+        if not msg:
+            continue
+        # en la primera corrida ignoramos los comandos viejos (más de 10 min)
+        if first_poll and now - int(msg.get("date") or 0) > 600:
+            continue
+        try:
+            handle_message(session, cfg, model_id, username, msg)
+        except Exception as exc:
+            log("Aviso: no se pudo responder un comando ({}).".format(exc))
+    save_state(update_offset=last_id + 1)
+
+
+# ---------------------------------------------------------------------------
 # Estado (para avisar solo en los cambios, no en cada chequeo)
 # ---------------------------------------------------------------------------
 
 def load_state():
     try:
         # utf-8-sig por si el archivo fue editado en Windows con BOM
-        return json.loads(STATE_FILE.read_text(encoding="utf-8-sig"))
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
+    return state if isinstance(state, dict) else None
 
 
-def save_state(online):
+def save_state(online=None, **extra):
+    """Guarda el estado sin pisar los otros datos (online, offset, etc.)."""
+    state = load_state() or {}
+    if online is not None:
+        state["online"] = bool(online)
+    state.update(extra)
     STATE_FILE.write_text(
-        json.dumps({"online": bool(online)}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -336,6 +509,13 @@ def run_check(session, cfg):
         log("{}: desconectada".format(username))
 
     prev = load_state()
+
+    if cfg["top_enabled"]:
+        try:
+            process_updates(session, cfg, model_id, username)
+        except Exception as exc:
+            log("Aviso: no se pudieron leer los comandos de Telegram ({}).".format(exc))
+
     if prev is None:
         # primera corrida: guardar el estado actual sin avisar, para no
         # spamear el grupo si la modelo ya estaba en vivo al configurar
@@ -401,6 +581,19 @@ def cmd_status(cfg):
         print("Link: https://stripchat.com/{}".format(username))
     else:
         print("{} está desconectada.".format(username))
+    return 0
+
+
+def cmd_top(cfg, args):
+    session = make_session()
+    username = normalize_model(cfg["model"])
+    model_id = resolve_model_id(session, username)
+    if model_id is None:
+        print("No existe la modelo '{}'.".format(username))
+        return 1
+    period = parse_top_period(args.period or "")
+    tippers = query_tippers(session, model_id, period)
+    print(format_tippers(username, tippers, period, cfg["top_limit"]))
     return 0
 
 
@@ -472,6 +665,10 @@ def cmd_get_sticker_id(cfg):
         print("  1) Buscá al bot (ej: @panchiibot) en Telegram y abrí un chat privado.")
         print("  2) Mandale ahí el sticker que querés usar (de cualquier pack).")
         print("  3) Volvé a correr: python bot.py get-sticker-id")
+        print(
+            "Si el chequeo automático ya leyó el mensaje, poné TOP_ENABLED=0 un "
+            "momento (o pausá el workflow), mandá el sticker de nuevo y repetí."
+        )
         return 1
     print("Stickers que le mandaron al bot (el ÚLTIMO es el que se va a usar):")
     for st in found:
@@ -569,6 +766,7 @@ def main():
             "  make-sticker-set crea tu pack de stickers desde un .webm\n"
             "  test-message   manda un mensaje de prueba al grupo\n"
             "  status         muestra el estado actual de la modelo\n"
+            "  top            muestra el top de donadores (hoy, mes, mes pasado)\n"
             "  check          chequea una vez y avisa si se conectó\n"
             "  loop           chequea para siempre (PC encendida)"
         ),
@@ -577,6 +775,13 @@ def main():
     sub.add_parser("check", help="chequea una vez y avisa si se conectó/desconectó (ideal para cron)")
     sub.add_parser("loop", help="chequea en forma continua, cada CHECK_INTERVAL segundos")
     sub.add_parser("status", help="muestra el estado actual, sin avisar nada")
+    p = sub.add_parser("top", help="muestra el top de donadores de la modelo")
+    p.add_argument(
+        "period",
+        nargs="?",
+        default="",
+        help="hoy (por defecto), 'mes' o 'mes pasado'",
+    )
     sub.add_parser("test-message", help="manda un mensaje de prueba al grupo (previsualiza sticker y texto)")
     sub.add_parser("get-chat-id", help="lista los chats que ve el bot (para averiguar el ID del grupo)")
     sub.add_parser("get-sticker-id", help="lista los stickers que le mandaron al bot (para configurar el aviso)")
@@ -597,6 +802,8 @@ def main():
         require("STRIPCHAT_MODEL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
     elif args.command == "status":
         require("STRIPCHAT_MODEL")
+    elif args.command == "top":
+        require("STRIPCHAT_MODEL")
     elif args.command == "test-message":
         require("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
     elif args.command == "get-chat-id":
@@ -616,6 +823,8 @@ def main():
         "make-sticker-set": cmd_make_sticker_set,
     }
     try:
+        if args.command == "top":
+            return cmd_top(cfg, args)
         return commands[args.command](cfg)
     except KeyboardInterrupt:
         print("Chau.")

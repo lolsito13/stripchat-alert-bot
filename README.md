@@ -13,6 +13,9 @@ Show: público
 
 Incluye la foto de la sala en el aviso (se puede desactivar).
 
+Además, en el grupo se puede escribir **`/top`** y el bot responde con el
+top de donadores del día (o del mes, ver más abajo).
+
 ## Archivos
 
 | Archivo | Para qué sirve |
@@ -102,6 +105,7 @@ pip install -r requirements.txt
 ```
 python bot.py test-message   # tiene que llegar un mensaje al grupo
 python bot.py status         # estado actual de la modelo
+python bot.py top            # top de donadores de hoy (no manda nada)
 python bot.py check          # una corrida real: guarda el estado
 ```
 
@@ -185,7 +189,43 @@ CHECK_INTERVAL=30
 
 # mensaje de desconexión
 MESSAGE_OFFLINE=⚫ {model} se desconectó
+
+# contestar /top en el grupo (1 = sí, 0 = no; por defecto: 1)
+TOP_ENABLED=1
+
+# cuántos puestos mostrar en /top (máximo 10; por defecto: 10)
+TOP_LIMIT=10
 ```
+
+### Comando `/top` en el grupo
+
+Cualquiera en el grupo puede escribir:
+
+```
+/top            → top de donadores de hoy
+/top mes        → top del mes en curso
+/top mes pasado → top del mes anterior
+```
+
+El bot contesta citando el mensaje, con los primeros puestos (hasta 10) y los
+tokens donados. La información es la misma que muestra Stripchat en el ranking de
+"top tippers" de la sala, así que **solo funciona si la modelo tiene ese
+ranking público** (`tipLeaderboardSettings.isPublic`).
+
+Cosas a tener en cuenta:
+
+- En GitHub Actions el bot lee los mensajes **en cada corrida del cron**
+  (cada 5 minutos), así que la respuesta puede demorar hasta ~5 minutos.
+  Si corrés `python bot.py loop` en una PC/VPS, contesta en el próximo
+  chequeo (por defecto, 60 segundos).
+- Solo contesta en el grupo configurado en `TELEGRAM_CHAT_ID` (y por privado
+  a tu usuario de `TELEGRAM_USER_ID`, para que puedas probarlo).
+- El bot guarda hasta dónde leyó en `state.json` (campo `update_offset`),
+  así no repite la misma respuesta en cada corrida.
+- Como el chequeo automático también lee los mensajes, puede consumir los
+  updates que usan `get-chat-id` y `get-sticker-id`. Si necesitás volver a
+  correr esos comandos, poné `TOP_ENABLED=0` un momento (o pausá el
+  workflow), mandá el mensaje/sticker de nuevo y repetí.
 
 ### Sticker en vez de la foto
 
@@ -238,6 +278,11 @@ exactamente 512px, hasta 3 segundos, hasta 30 fps, sin audio y menos de
   red; el bot reintenta en el próximo chequeo, no pasa nada.
 - **Aviso tardío con GitHub Actions** → el cron de GitHub a veces se demora
   unos minutos en horas pico. Es lo que hay con gratis 😅.
+- **`/top` no contesta** → revisá que `TOP_ENABLED` no esté en `0`, que el
+  bot esté en el grupo y que la modelo tenga el ranking público. En GitHub
+  Actions puede tardar hasta ~5 minutos. Si tenés el bot corriendo en dos
+  lugares a la vez, Telegram rechaza uno de los dos `getUpdates`: dejá una
+  sola instancia.
 
 ## ¿Cómo funciona?
 
@@ -246,10 +291,13 @@ Consultar si una modelo está en vivo no requiere autenticación:
 1. `GET stripchat.com/api/front/users/user-ids/{usuario}` → ID numérico.
 2. `POST stripchat.com/api/front/models/get-statuses` → si la modelo está en
    vivo aparece en la respuesta (con el tipo de show).
+3. `GET stripchat.com/api/front/models/{id}/tips-leaderboard` → top de
+   donadores del día (también hay `/current-month` y `/monthly/{mes}/{año}`).
 
-La foto sale de `img.doppiocdn.com`. El bot solo envía mensajes a Telegram
-(no lee los del grupo), así que no necesita estar corriendo todo el tiempo:
-alcanza con ejecutarlo cada tanto (por eso funciona en GitHub Actions).
+La foto sale de `img.doppiocdn.com`. El bot solo manda mensajes al grupo y,
+para el `/top`, lee los mensajes nuevos con `getUpdates` (no lee todo el
+historial del grupo). No necesita estar corriendo todo el tiempo: alcanza con
+ejecutarlo cada tanto (por eso funciona en GitHub Actions).
 
 El flujo de la API es el mismo que usa el proyecto open-source
 [bcmk/siren](https://github.com/bcmk/siren) (un bot de avisos para muchas
